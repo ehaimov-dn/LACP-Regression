@@ -250,6 +250,195 @@ def access_device(device_name: str, data_type: str = 'all') -> Dict[str, Any]:
     return device_manager.load_device_data(device_name, data_type)
 
 
+def run_lacp_tests_on_device(device_name: str, test_filter: str = None) -> bool:
+    """Run LACP tests on a specific device
+    
+    Args:
+        device_name: Name of the device to test
+        test_filter: Optional filter to run specific tests (e.g., "bundle", "creation")
+        
+    Returns:
+        True if all tests passed, False otherwise
+    """
+    device_manager = DeviceManager()
+    
+    # Verify device exists
+    if device_name not in device_manager.list_devices():
+        print(f"❌ Device '{device_name}' not found")
+        print("Available devices:", device_manager.list_devices())
+        return False
+    
+    # Get device information
+    print("=" * 80)
+    print(f"🧪 Running LACP Tests on Device: {device_name}")
+    print("=" * 80)
+    
+    device_manager.print_device_summary(device_name)
+    
+    # Check if device has LACP interfaces
+    lacp_interfaces = device_manager.find_lacp_interfaces(device_name)
+    if not lacp_interfaces:
+        print(f"\n⚠️  Warning: No LACP interfaces found on {device_name}")
+        print("Proceeding with tests anyway...")
+    else:
+        print(f"\n✅ Found {len(lacp_interfaces)} LACP interfaces on {device_name}")
+    
+    # Get device credentials for test execution
+    credentials = device_manager.get_device_credentials(device_name)
+    if not credentials:
+        print("⚠️  Warning: No credentials found for device")
+    else:
+        print(f"🔐 Using hostname: {credentials.get('hostname', 'Unknown')}")
+    
+    print("\n" + "=" * 80)
+    print("Starting LACP Test Execution...")
+    print("=" * 80)
+    
+    # Get the current directory (where main.py is located)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Find all Test-Bundle_* directories
+    test_dirs = glob.glob(os.path.join(base_dir, "Test-Bundle_*"))
+    test_dirs.sort()
+    
+    # Filter tests if specified
+    if test_filter:
+        filtered_dirs = []
+        for test_dir in test_dirs:
+            test_name = os.path.basename(test_dir).lower()
+            if test_filter.lower() in test_name:
+                filtered_dirs.append(test_dir)
+        test_dirs = filtered_dirs
+        
+        if not test_dirs:
+            print(f"❌ No tests found matching filter: {test_filter}")
+            return False
+        print(f"🔍 Running {len(test_dirs)} tests matching filter '{test_filter}'")
+    else:
+        print(f"🔍 Running all {len(test_dirs)} LACP tests")
+    
+    if not test_dirs:
+        print("❌ No test directories found!")
+        return False
+    
+    passed_tests = 0
+    failed_tests = 0
+    device_specific_env = os.environ.copy()
+    
+    # Set environment variables for the tests to use device information
+    device_specific_env['LACP_TEST_DEVICE'] = device_name
+    if credentials:
+        device_specific_env['LACP_TEST_HOSTNAME'] = credentials.get('hostname', '')
+        device_specific_env['LACP_TEST_USERNAME'] = credentials.get('username', '')
+        device_specific_env['LACP_TEST_PASSWORD'] = credentials.get('password', '')
+    
+    # Run each test with device context
+    for test_dir in test_dirs:
+        test_name = os.path.basename(test_dir)
+        main_py_path = os.path.join(test_dir, "main.py")
+        
+        if not os.path.exists(main_py_path):
+            print(f"⚠️  SKIPPED: {test_name} (main.py not found)")
+            continue
+        
+        print(f"\n🔄 Running: {test_name} on {device_name}")
+        print("-" * 60)
+        
+        try:
+            # Run the test's main.py file with device environment
+            result = subprocess.run([sys.executable, main_py_path], 
+                                  capture_output=True, 
+                                  text=True, 
+                                  timeout=60,  # Increased timeout for device tests
+                                  env=device_specific_env)
+            
+            if result.returncode == 0:
+                print(f"✅ PASSED: {test_name}")
+                if result.stdout.strip():
+                    print(f"   Output: {result.stdout.strip()}")
+                passed_tests += 1
+            else:
+                print(f"❌ FAILED: {test_name} (exit code: {result.returncode})")
+                if result.stderr.strip():
+                    print(f"   Error: {result.stderr.strip()}")
+                if result.stdout.strip():
+                    print(f"   Output: {result.stdout.strip()}")
+                failed_tests += 1
+                
+        except subprocess.TimeoutExpired:
+            print(f"⏰ TIMEOUT: {test_name} (exceeded 60 seconds)")
+            failed_tests += 1
+        except Exception as e:
+            print(f"💥 ERROR: {test_name} - {str(e)}")
+            failed_tests += 1
+    
+    # Print test summary
+    print("\n" + "=" * 80)
+    print(f"LACP TEST RESULTS FOR {device_name}")
+    print("=" * 80)
+    print(f"Total tests: {passed_tests + failed_tests}")
+    print(f"✅ Passed: {passed_tests}")
+    print(f"❌ Failed: {failed_tests}")
+    
+    if failed_tests == 0:
+        print(f"\n🎉 All LACP tests passed on {device_name}!")
+        return True
+    else:
+        print(f"\n⚠️  {failed_tests} test(s) failed on {device_name}!")
+        return False
+
+
+def interactive_device_selection():
+    """Interactive device selection and test execution"""
+    device_manager = DeviceManager()
+    devices = device_manager.list_devices()
+    
+    if not devices:
+        print("❌ No devices found in Devices directory")
+        return
+    
+    print("\n🎯 LACP Test Device Selection")
+    print("=" * 50)
+    print("Available devices:")
+    
+    for i, device in enumerate(devices, 1):
+        print(f"  {i}. {device}")
+    
+    try:
+        choice = input(f"\nSelect device (1-{len(devices)}) or 'q' to quit: ").strip()
+        
+        if choice.lower() == 'q':
+            print("👋 Goodbye!")
+            return
+        
+        device_index = int(choice) - 1
+        if 0 <= device_index < len(devices):
+            selected_device = devices[device_index]
+            
+            print(f"\n✅ Selected device: {selected_device}")
+            
+            # Ask for test filter
+            test_filter = input("\nEnter test filter (optional, press Enter for all tests): ").strip()
+            
+            # Run tests on selected device
+            success = run_lacp_tests_on_device(selected_device, test_filter if test_filter else None)
+            
+            if success:
+                print(f"\n🎉 All tests completed successfully on {selected_device}!")
+            else:
+                print(f"\n⚠️  Some tests failed on {selected_device}")
+                
+        else:
+            print("❌ Invalid selection")
+            
+    except ValueError:
+        print("❌ Invalid input. Please enter a number.")
+    except KeyboardInterrupt:
+        print("\n\n👋 Test execution cancelled by user")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
+
 def run_test_suite():
     """Run all test files in the Test-Bundle_* directories"""
     print("=" * 60)
@@ -342,27 +531,52 @@ def main():
             list_available_devices()
             
         elif command == "device" and len(sys.argv) > 2:
-            # Access specific device
+            # Access specific device or run tests on device
             device_name = sys.argv[2]
-            data_type = sys.argv[3] if len(sys.argv) > 3 else 'all'
+            action = sys.argv[3].lower() if len(sys.argv) > 3 else 'info'
             
             device_manager = DeviceManager()
             if device_name in device_manager.list_devices():
-                device_manager.print_device_summary(device_name)
                 
-                if data_type != 'summary':
-                    print(f"\n🔍 Loading {data_type} data for {device_name}...")
-                    data = device_manager.load_device_data(device_name, data_type)
+                if action == "test":
+                    # Run LACP tests on the specific device
+                    test_filter = sys.argv[4] if len(sys.argv) > 4 else None
+                    success = run_lacp_tests_on_device(device_name, test_filter)
+                    sys.exit(0 if success else 1)
+                    
+                elif action in ['interfaces', 'lldp', 'system', 'all']:
+                    # Load specific data type
+                    device_manager.print_device_summary(device_name)
+                    print(f"\n🔍 Loading {action} data for {device_name}...")
+                    data = device_manager.load_device_data(device_name, action)
                     
                     if data:
-                        print(f"✅ Successfully loaded {data_type} data")
-                        # You can add more detailed output here if needed
+                        print(f"✅ Successfully loaded {action} data")
                     else:
-                        print(f"❌ No {data_type} data found")
+                        print(f"❌ No {action} data found")
+                        
+                else:
+                    # Default - show device summary
+                    device_manager.print_device_summary(device_name)
+                    
             else:
                 print(f"❌ Device '{device_name}' not found")
                 print("Available devices:", device_manager.list_devices())
                 
+        elif command == "test":
+            if len(sys.argv) > 2:
+                device_name = sys.argv[2]
+                test_filter = sys.argv[3] if len(sys.argv) > 3 else None
+                success = run_lacp_tests_on_device(device_name, test_filter)
+                sys.exit(0 if success else 1)
+            else:
+                # Interactive device selection
+                interactive_device_selection()
+                
+        elif command == "interactive":
+            # Interactive device selection and testing
+            interactive_device_selection()
+            
         elif command == "help":
             print_help()
             
@@ -371,28 +585,47 @@ def main():
             print_help()
             sys.exit(1)
     else:
-        # Default behavior - run test suite
-        success = run_test_suite()
-        sys.exit(0 if success else 1)
+        # Default behavior - interactive device selection
+        interactive_device_selection()
 
 
 def print_help():
     """Print usage help"""
     print("\n📖 LACP Regression Test Suite - Usage:")
-    print("=" * 50)
-    print("python main.py                    - Run all test cases")
-    print("python main.py devices            - List all available devices")
-    print("python main.py device <name>      - Show device summary")
-    print("python main.py device <name> <type> - Load specific data type")
-    print("python main.py help               - Show this help")
+    print("=" * 60)
+    print("🎯 DEVICE TESTING:")
+    print("python main.py                           - Interactive device selection & testing")
+    print("python main.py interactive               - Interactive device selection & testing")
+    print("python main.py test                      - Interactive device selection & testing")
+    print("python main.py test <device>             - Run all LACP tests on device")
+    print("python main.py test <device> <filter>    - Run filtered LACP tests on device")
+    print("python main.py device <name> test        - Run all LACP tests on device")
+    print("python main.py device <name> test <filter> - Run filtered LACP tests on device")
     print()
-    print("Data types: 'interfaces', 'lldp', 'system', 'all'")
+    print("📋 DEVICE INFORMATION:")
+    print("python main.py devices                   - List all available devices")
+    print("python main.py device <name>             - Show device summary")
+    print("python main.py device <name> <type>      - Load specific data type")
     print()
-    print("Examples:")
-    print("  python main.py devices")
-    print("  python main.py device R1_CL16_Eddie")
-    print("  python main.py device R1_CL16_Eddie interfaces")
-    print("  python main.py device R2_SA40_Eddie lldp")
+    print("❓ HELP:")
+    print("python main.py help                      - Show this help")
+    print()
+    print("📊 Data types: 'interfaces', 'lldp', 'system', 'all'")
+    print("🔍 Test filters: 'bundle', 'creation', 'member', 'systemid', etc.")
+    print()
+    print("💡 Examples:")
+    print("  python main.py                          # Interactive mode")
+    print("  python main.py devices                  # List all devices")
+    print("  python main.py test R1_CL16_Eddie       # Run all tests on R1_CL16_Eddie")
+    print("  python main.py test R1_CL16_Eddie bundle # Run bundle tests on R1_CL16_Eddie")
+    print("  python main.py device R2_SA40_Eddie test # Run all tests on R2_SA40_Eddie")
+    print("  python main.py device R3_SA40_Eddie interfaces # Show interfaces")
+    print()
+    print("🌟 Environment Variables (set automatically for tests):")
+    print("  LACP_TEST_DEVICE   - Current device name")
+    print("  LACP_TEST_HOSTNAME - Device hostname")
+    print("  LACP_TEST_USERNAME - Device username") 
+    print("  LACP_TEST_PASSWORD - Device password")
 
 
 if __name__ == "__main__":
